@@ -70,6 +70,22 @@ Set an expiry you're comfortable with; when it expires, make a new one and updat
 
 The free app goes to sleep when unused; the first open can take ~30 seconds. Alerts are unaffected.
 
+## Watchlist (stocks you want to buy)
+
+Upload a watchlist the same way as a sold list (Lists & alerts → choose India or US → Save and track).
+The app recognises it from the columns, so no extra setting is needed.
+
+| Column | Needed? | What it does |
+|---|---|---|
+| Symbol (or Ticker) | Required | Stock to watch |
+| Target Buy Price | Required | Email when the price falls to or below this |
+| Alert Above Price | Optional | Email if the price rises to or above this |
+| Notes | Optional | Shown on the dashboard and in the email |
+| Exchange | Optional | NSE, BSE or US; blank = market chosen at upload |
+
+Watchlist stocks appear in their own **Watchlist** tab, have no P&L, and are never added to your
+P&L totals. `watchlist_template.xlsx` is an example. Keep Indian and US stocks in separate files.
+
 ## Excel format
 
 Column names are flexible. These all work:

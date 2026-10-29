@@ -22,9 +22,10 @@ def check_market(lots, market, label, settings, state, dry_run):
     cur = core.MARKETS[market]["cur"]
     print(f"\n[{market}] {label}")
     for _, r in res.iterrows():
-        print(f"  {r['symbol']:<12} sold {core.money(r['sell_price'], cur):>12}  now "
-              f"{core.money(r['ltp'], cur):>12}  buy<= {core.money(r['buy_level'], cur):>12}  "
-              f"miss>= {core.money(r['miss_level'], cur):>12}  {r['status']}")
+        tag = "watchlist" if r["kind"] == "watch" else f"sold {core.money(r['sell_price'], cur):>9}"
+        print(f"  {r['symbol']:<12} {tag:<15} now {core.money(r['ltp'], cur):>12}  "
+              f"buy<= {core.money(r['buy_level'], cur):>12}  "
+              f"above>= {core.money(r['miss_level'], cur):>12}  {r['status']}")
     rows, new_state = core.pending_alerts(res, state)
     if not rows:
         print(f"[{market}] no new triggers")

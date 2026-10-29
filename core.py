@@ -57,11 +57,17 @@ COLUMN_ALIASES = {
     "sell_date": ["sell date", "sold on", "date sold", "trade date", "exit date", "date"],
     "buy_trigger": ["expected buy price", "buy trigger price", "buy trigger", "buy target",
                     "target buy price", "re entry price", "reentry price", "threshold price",
-                    "threshold", "buy threshold", "trigger price"],
+                    "threshold", "buy threshold", "trigger price", "target price", "target",
+                    "buy below", "buy below price"],
     "miss_trigger": ["expected miss price", "miss trigger price", "miss trigger", "miss price",
-                     "miss threshold"],
+                     "miss threshold", "alert above price", "alert above", "alert if above",
+                     "rise above", "sell above", "upper alert", "breakout price"],
+    "notes": ["notes", "note", "remarks", "comment", "comments"],
 }
-REQUIRED = ["symbol", "quantity", "sell_price"]
+# A sold-stocks file has Symbol + Quantity + Sell Price.
+# A watchlist file has Symbol + Target Buy Price and no Quantity / Sell Price.
+SOLD_REQUIRED = {"symbol", "quantity", "sell_price"}
+WATCH_REQUIRED = {"symbol", "buy_trigger"}
 
 
 # ---------------- settings ----------------
@@ -106,16 +112,23 @@ def load_portfolio(source, default_market: str = "IN", name: str | None = None) 
                 frame = raw.iloc[skip:].reset_index(drop=True)
                 frame.columns = raw.iloc[skip - 1].tolist()
             mapping = _map_columns(frame.columns)
-            if all(r in mapping.values() for r in REQUIRED):
-                df = frame.rename(columns=mapping)[list(mapping.values())].copy()
-                df = _clean(df, default_market)
-                df["source"] = Path(name).name
-                return df
-    raise ValueError(f"{Path(name).name}: couldn't find Symbol/Ticker, Quantity and Sell Price columns.")
+            keys = set(mapping.values())
+            if SOLD_REQUIRED <= keys:
+                kind = "sold"
+            elif WATCH_REQUIRED <= keys:
+                kind = "watch"
+            else:
+                continue
+            df = frame.rename(columns=mapping)[list(mapping.values())].copy()
+            df = _clean(df, default_market, kind)
+            df["source"] = Path(name).name
+            return df
+    raise ValueError(f"{Path(name).name}: needs either Symbol + Quantity + Sell Price (sold stocks) "
+                     "or Symbol + Target Buy Price (watchlist).")
 
 
-def _clean(df: pd.DataFrame, default_market: str) -> pd.DataFrame:
-    for col in ["exchange", "sell_date", "buy_trigger", "miss_trigger"]:
+def _clean(df: pd.DataFrame, default_market: str, kind: str = "sold") -> pd.DataFrame:
+    for col in ["exchange", "sell_date", "buy_trigger", "miss_trigger", "quantity", "sell_price", "notes"]:
         if col not in df.columns:
             df[col] = pd.NA
     df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
@@ -123,8 +136,14 @@ def _clean(df: pd.DataFrame, default_market: str) -> pd.DataFrame:
     for col in ["quantity", "sell_price", "buy_trigger", "miss_trigger"]:
         df[col] = pd.to_numeric(df[col].astype(str).str.replace(r"[₹$,\s]", "", regex=True),
                                 errors="coerce")
-    df = df.dropna(subset=["quantity", "sell_price"])
-    df = df[(df["quantity"] > 0) & (df["sell_price"] > 0)].copy()
+    if kind == "sold":
+        df = df.dropna(subset=["quantity", "sell_price"])
+        df = df[(df["quantity"] > 0) & (df["sell_price"] > 0)].copy()
+    else:
+        df = df.dropna(subset=["buy_trigger"])
+        df = df[df["buy_trigger"] > 0].copy()
+    df["kind"] = kind
+    df["notes"] = [("" if pd.isna(n) else str(n).strip()) for n in df["notes"]]
     ex = [str(e).strip().upper() if pd.notna(e) else "" for e in df["exchange"]]
     ex = ["" if e in ("NAN", "<NA>", "NONE") else e for e in ex]
     df["market"] = [("US" if e in US_EXCHANGES else "IN") if e else default_market for e in ex]
@@ -211,7 +230,7 @@ def compute(df: pd.DataFrame, prices: dict, miss_pct: float, buy_pct: float) -> 
             return "NO PRICE"
         if row["ltp"] <= row["buy_level"]:
             return "BUY"
-        if row["ltp"] >= row["miss_level"]:
+        if pd.notna(row["miss_level"]) and row["ltp"] >= row["miss_level"]:
             return "MISS"
         return "WATCH"
 
@@ -251,6 +270,8 @@ def mark_slot_done(state: dict, market: str, slot_id: str, now_utc: datetime | N
 # ---------------- alert state ----------------
 
 def lot_key(row) -> str:
+    if row.get("kind") == "watch":
+        return f"{row['market']}|W|{row['yahoo']}|{row['buy_level']:.4f}"
     d = row["sell_date"].strftime("%Y-%m-%d") if pd.notna(row["sell_date"]) else "na"
     return f"{row['market']}|{row['yahoo']}|{d}|{row['sell_price']:.4f}|{row['quantity']:g}"
 
@@ -304,17 +325,27 @@ def money(x, cur="₹", decimals=2) -> str:
 def build_alert_email(rows, market: str, slot_label: str) -> tuple[str, str]:
     cfg = MARKETS[market]
     cur = cfg["cur"]
-    buys = [r for r in rows if r["status"] == "BUY"]
-    misses = [r for r in rows if r["status"] == "MISS"]
+    def pick(kind, status):
+        return [r for r in rows if r.get("kind", "sold") == kind and r["status"] == status]
+    s_buy, s_miss = pick("sold", "BUY"), pick("sold", "MISS")
+    w_buy, w_up = pick("watch", "BUY"), pick("watch", "MISS")
+
     parts = []
-    if buys:
-        parts.append("BUY " + ", ".join(r["symbol"] for r in buys))
-    if misses:
-        parts.append("MISS " + ", ".join(r["symbol"] for r in misses))
-    subject = f"[{cfg['name']}] Trigger alert: " + " | ".join(parts)
+    for label, items in (("BUY", s_buy), ("MISS", s_miss), ("Watchlist buy", w_buy),
+                         ("Watchlist above", w_up)):
+        if items:
+            parts.append(f"{label} " + ", ".join(r["symbol"] for r in items))
+    subject = f"[{cfg['name']}] Alert: " + " | ".join(parts)
 
     td = "padding:6px 10px;text-align:right"
-    def table(items, title, colour, note):
+    th = lambda cols: "".join(f"<th style='padding:6px 10px'>{h}</th>" for h in cols)
+    def wrap(title, colour, note, head, trs):
+        return (f"<h3 style='color:{colour};margin:18px 0 4px'>{title}</h3>"
+                f"<p style='margin:0 0 8px;color:#555'>{note}</p>"
+                "<table style='border-collapse:collapse;font-size:14px' border='1' bordercolor='#ddd'>"
+                f"<tr style='background:#f4f6f8'>{head}</tr>{trs}</table>")
+
+    def sold_table(items, title, colour, note):
         if not items:
             return ""
         trs = "".join(
@@ -325,21 +356,33 @@ def build_alert_email(rows, market: str, slot_label: str) -> tuple[str, str]:
             f"<td style='{td}'>{money(r['buy_level'] if r['status'] == 'BUY' else r['miss_level'], cur)}</td>"
             f"<td style='{td}'>{r['quantity']:g}</td>"
             f"<td style='{td}'>{money(r['notional_pnl'], cur)}</td></tr>" for r in items)
-        head = "".join(f"<th style='padding:6px 10px'>{h}</th>" for h in
-                       ["Stock", "Sold at", "Now", "Move", "Trigger", "Qty", "Notional P&amp;L"])
-        return (f"<h3 style='color:{colour};margin:18px 0 4px'>{title}</h3>"
-                f"<p style='margin:0 0 8px;color:#555'>{note}</p>"
-                "<table style='border-collapse:collapse;font-size:14px' border='1' bordercolor='#ddd'>"
-                f"<tr style='background:#f4f6f8'>{head}</tr>{trs}</table>")
+        return wrap(title, colour, note, th(["Stock", "Sold at", "Now", "Move", "Trigger", "Qty",
+                                             "Notional P&amp;L"]), trs)
+
+    def watch_table(items, title, colour, note):
+        if not items:
+            return ""
+        trs = "".join(
+            f"<tr><td style='padding:6px 10px'><b>{r['symbol']}</b></td>"
+            f"<td style='{td}'><b>{money(r['ltp'], cur)}</b></td>"
+            f"<td style='{td}'>{money(r['buy_level'] if r['status'] == 'BUY' else r['miss_level'], cur)}</td>"
+            f"<td style='{td}'>{r['day_change_pct']:+.2f}%</td>"
+            f"<td style='padding:6px 10px'>{r.get('notes', '')}</td></tr>" for r in items)
+        return wrap(title, colour, note, th(["Stock", "Now", "Your price", "Today", "Notes"]), trs)
 
     now = datetime.now(ZoneInfo(cfg["tz"])).strftime("%d %b %Y, %I:%M %p %Z")
     html = ("<div style='font-family:Arial,sans-serif;color:#1d2433'>"
             f"<p>{cfg['name']} market · {slot_label} · {now}</p>"
-            + table(buys, "Buy trigger hit", "#0b8a5f", "Fallen to or below your buy price since you sold.")
-            + table(misses, "Miss trigger hit", "#c2410c", "Risen to or above your miss level since you sold.")
+            + sold_table(s_buy, "Buy trigger hit", "#0b8a5f",
+                         "Sold stocks that have fallen to or below your buy price.")
+            + sold_table(s_miss, "Miss trigger hit", "#c2410c",
+                         "Sold stocks that have risen to or above your miss level.")
+            + watch_table(w_buy, "Watchlist: buy price reached", "#0b8a5f",
+                          "Watchlist stocks at or below your target buy price.")
+            + watch_table(w_up, "Watchlist: rose above your alert price", "#c2410c",
+                          "Watchlist stocks at or above the upper price you set.")
             + "<p style='color:#888;font-size:12px;margin-top:18px'>Prices from Yahoo Finance, may be "
-              "delayed ~15 min. Notional P&amp;L = (sell price − current price) × qty. "
-              "Not investment advice.</p></div>")
+              "delayed ~15 min. Not investment advice.</p></div>")
     return subject, html
 
 
