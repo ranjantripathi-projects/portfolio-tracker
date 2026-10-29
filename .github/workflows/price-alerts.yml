@@ -1,0 +1,68 @@
+name: Price trigger alerts
+
+# Three checks per trading day for each market. GitHub cron is in UTC, so the US
+# times are listed for both summer (EDT) and winter (EST); alert_runner.py works out
+# which one is the real slot today and ignores the other.
+#
+#   India (IST)  09:30 open · 12:30 mid · 15:00 close
+#   US (New York) 09:45 open · 12:45 mid · 15:30 close
+on:
+  schedule:
+    - cron: "0 4 * * 1-5"     # India open   09:30 IST
+    - cron: "0 7 * * 1-5"     # India mid    12:30 IST
+    - cron: "30 9 * * 1-5"    # India close  15:00 IST
+    - cron: "45 13 * * 1-5"   # US open  (summer)
+    - cron: "45 14 * * 1-5"   # US open  (winter)
+    - cron: "45 16 * * 1-5"   # US mid   (summer)
+    - cron: "45 17 * * 1-5"   # US mid   (winter)
+    - cron: "30 19 * * 1-5"   # US close (summer)
+    - cron: "30 20 * * 1-5"   # US close (winter)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to do"
+        type: choice
+        options: [check-now, test-email]
+        default: check-now
+
+permissions:
+  contents: write
+
+concurrency:
+  group: price-alerts
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Check prices and email new triggers
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: |
+          case "${{ github.event.inputs.mode }}" in
+            test-email) python alert_runner.py --test ;;
+            check-now)  python alert_runner.py --force ;;
+            *)          python alert_runner.py ;;
+          esac
+
+      - name: Remember which alerts were already sent
+        run: |
+          if [[ -n "$(git status --porcelain alerts_state.json)" ]]; then
+            git config user.name "price-alert-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add alerts_state.json
+            git commit -m "Update alert state [skip ci]"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push
+          fi
